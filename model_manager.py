@@ -37,6 +37,8 @@ MAX_MODELS = 50
 MULTIPART_REGEX = r'(.+)-\d{1,5}-of-\d{1,5}\.gguf$'
 APP_NAME = "GGUF Model Manager"
 APP_VERSION = "3.0"
+PRESETS_FILE = os.path.expanduser("~/presets.ini")
+
 
 # Download engine configuration -- must be set before importing huggingface_hub internals
 os.environ["HF_HUB_DISABLE_XET"] = "1"            # Use HTTP downloader (resume + Ctrl+C work; Xet breaks both)
@@ -595,6 +597,127 @@ def download_with_progress(repo_id: str, local_dir: str, patterns: List[str],
             RichTqdm.set_progress(None)
 
 
+
+# ---------------------------------------------------------------------------
+# Preset auto-generation
+# ---------------------------------------------------------------------------
+def _detect_preset_params(repo_id: str, selected_files: List[str]) -> dict:
+    """Infer sensible preset parameters from repo_id and selected files."""
+    all_text = (repo_id + " " + " ".join(selected_files)).lower()
+
+    # Detect MoE (active-param suffix like A3B, A10B, A22B or keyword moe)
+    is_moe = bool(re.search(r'-a\d+b|moe|_moe', all_text))
+
+    # Extract total param size (e.g. 35B, 27B, 122B)
+    size_match = re.search(r'(\d+(?:\.\d+)?)b', all_text)
+    total_b = float(size_match.group(1)) if size_match else 7.0
+
+    # Detect if model needs reasoning format (thinking/reasoning models)
+    is_reasoning = bool(re.search(r'thinking|reason|qwq|deepseek-r|skywork-o', all_text))
+
+    # Detect if multi-part (needs first shard path)
+    first_file = sorted(selected_files)[0] if selected_files else ''
+    multipart_match = re.search(r'(.+)-(\d{5})-of-(\d{5})\.gguf$', first_file, re.IGNORECASE)
+
+    # Build model path
+    if multipart_match:
+        model_path = f"models/{repo_id}/{first_file}"
+    else:
+        model_path = f"models/{repo_id}/{first_file}"
+
+    # Parameter defaults based on type/size
+    params = {
+        'model': model_path,
+        'n-gpu-layers': 99,
+        'temp': 0.7,
+        'batch-size': 4096,
+        'ubatch-size': 2048,
+        'jinja': 'on',
+    }
+
+    if is_moe:
+        params['ctx-size'] = 8192
+        params['tensor-split'] = '4,1' if total_b >= 100 else '1,1.2'
+        params['top-k'] = 20
+        params['top-p'] = 0.8
+        params['min-p'] = 0
+        params['presence-penalty'] = 1.5
+        if total_b >= 60:
+            params['n-cpu-moe'] = 22
+            params['cache-type-k'] = 'q8_0'
+            params['cache-type-v'] = 'q8_0'
+        elif total_b >= 30:
+            params['n-cpu-moe'] = 18
+    else:
+        params['ctx-size'] = 65536
+        params['tensor-split'] = '1,1'
+        params['cache-type-k'] = 'q8_0'
+        params['cache-type-v'] = 'q8_0'
+        params['top-k'] = 20
+        params['top-p'] = 0.8
+        params['min-p'] = 0
+        params['presence-penalty'] = 1.5
+
+    if is_reasoning:
+        params['temp'] = 0.6
+        params['reasoning-format'] = 'auto'
+        params['top-k'] = 20
+        params['top-p'] = 0.95
+
+    return params
+
+
+def _preset_name_from_repo(repo_id: str) -> str:
+    """Generate a clean preset name from repo_id."""
+    # Take last path component, strip common suffixes
+    name = repo_id.split('/')[-1]
+    for suffix in ['-GGUF', '-gguf', '-Instruct', '-instruct', '-Chat', '-chat']:
+        name = name.replace(suffix, '')
+    return name
+
+
+def offer_preset_generation(repo_id: str, selected_files: List[str]) -> None:
+    """After a successful download, offer to write a preset entry to presets.ini."""
+    if not os.path.exists(PRESETS_FILE):
+        print_warning(f"presets.ini not found at {PRESETS_FILE} — skipping preset generation")
+        return
+
+    preset_name = _preset_name_from_repo(repo_id)
+
+    # Check if preset already exists
+    with open(PRESETS_FILE, 'r') as f:
+        existing = f.read()
+    if f'[{preset_name}]' in existing:
+        print_info(f"Preset [{preset_name}] already exists in presets.ini — skipping")
+        return
+
+    params = _detect_preset_params(repo_id, selected_files)
+
+    # Show preview
+    console.print(f"\n[bold green]Preset preview — [{preset_name}][/bold green]")
+    for k, v in params.items():
+        console.print(f"  [dim]{k}[/dim] = {v}")
+
+    answer = _safe_input("\nWrite this preset to presets.ini? [Y/n/e(dit name)]: ")
+    if answer is None or answer.lower() == 'n':
+        return
+    if answer.lower() == 'e':
+        new_name = _safe_input("Preset name: ")
+        if new_name:
+            preset_name = new_name.strip()
+
+    # Build preset block
+    lines = [f"\n[{preset_name}]"]
+    for k, v in params.items():
+        lines.append(f"{k} = {v}")
+    block = "\n".join(lines) + "\n"
+
+    with open(PRESETS_FILE, 'a') as f:
+        f.write(block)
+
+    print_success(f"Preset [{preset_name}] written to {PRESETS_FILE}")
+    logging.info(f"Auto-generated preset [{preset_name}] for {repo_id}")
+
 def download_model(repo_id: str, selected_files: List[str],
                    is_update: bool = False, force: bool = False) -> bool:
     """
@@ -849,7 +972,8 @@ def search_and_download() -> None:
                             break
                         if confirm.lower() in ('', 'y', 'yes'):
                             logging.info(f"Selected quant for {selected_model.id}: {selected_files}")
-                            download_model(selected_model.id, selected_files)
+                            if download_model(selected_model.id, selected_files):
+                                offer_preset_generation(selected_model.id, selected_files)
                         break
                     else:
                         print_error(f"Please enter a number between 1 and {len(quant_list)}")

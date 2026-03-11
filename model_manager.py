@@ -42,7 +42,7 @@ APP_VERSION = "4.0"
 PRESETS_FILE = os.path.expanduser("~/presets.ini")
 LLAMA_SERVER_API_KEY = "Smiledog69!"
 LLAMA_SERVER_URL = "http://localhost:8080"
-LXC_HOST = "192.168.0.113"
+
 
 # Download engine configuration -- must be set before importing huggingface_hub internals
 os.environ["HF_HUB_DISABLE_XET"] = "1"            # Use HTTP downloader (resume + Ctrl+C work; Xet breaks both)
@@ -279,7 +279,7 @@ def get_disk_space() -> Tuple[float, float]:
     """Get disk space information (free, total in GB)."""
     try:
         result = subprocess.run(
-            ["ssh", LXC_HOST, "df", "/root/models"],
+            ["df", "/root"],
             capture_output=True, text=True, timeout=10
         )
         if result.returncode == 0:
@@ -300,7 +300,7 @@ def get_gpu_info() -> List[Dict[str, str]]:
     gpus = []
     try:
         result = subprocess.run(
-            ["ssh", LXC_HOST, "nvidia-smi", "--query-gpu=index,memory.used,memory.total", "--format=csv,noheader,nounits"],
+            ["nvidia-smi", "--query-gpu=index,memory.used,memory.total", "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=10
         )
         if result.returncode == 0:
@@ -322,12 +322,12 @@ def get_server_status() -> Tuple[bool, str]:
     """Check if llama-server is running and get loaded model."""
     try:
         result = subprocess.run(
-            ["ssh", LXC_HOST, "curl", "-s", "-m", "2", f"{LLAMA_SERVER_URL}/health"],
+            ["curl", "-s", "-m", "2", f"{LLAMA_SERVER_URL}/health"],
             capture_output=True, text=True, timeout=5
         )
         if result.returncode == 0 and '{"status":"ok"}' in result.stdout:
             slots_result = subprocess.run(
-                ["ssh", LXC_HOST, "curl", "-s", "-m", "2", "-H", f"Authorization: Bearer {LLAMA_SERVER_API_KEY}", f"{LLAMA_SERVER_URL}/slots"],
+                ["curl", "-s", "-m", "2", "-H", f"Authorization: Bearer {LLAMA_SERVER_API_KEY}", f"{LLAMA_SERVER_URL}/slots"],
                 capture_output=True, text=True, timeout=5
             )
             if slots_result.returncode == 0:
@@ -351,7 +351,7 @@ def count_downloaded_models() -> int:
     """Count number of downloaded models."""
     try:
         result = subprocess.run(
-            ["ssh", LXC_HOST, "ls", "-la", "/root/models/"],
+            ["ls", "-la", "/root/models/"],
             capture_output=True, text=True, timeout=10
         )
         if result.returncode == 0:
@@ -388,13 +388,13 @@ def _clean_stale_incomplete_files() -> None:
     """Remove .incomplete files older than STALE_THRESHOLD_HOURS from models/."""
     try:
         result = subprocess.run(
-            ["ssh", LXC_HOST, "find", "/root/models/", "-name", "*.incomplete", "-mtime", "+24", "-type", "f"],
+            ["find", "/root/models/", "-name", "*.incomplete", "-mtime", "+24", "-type", "f"],
             capture_output=True, text=True, timeout=30
         )
         if result.returncode == 0 and result.stdout.strip():
             for fpath in result.stdout.strip().split('\n'):
                 if fpath:
-                    subprocess.run(["ssh", LXC_HOST, "rm", "-f", fpath], capture_output=True)
+                    subprocess.run(["rm", "-f", fpath], capture_output=True)
     except Exception:
         pass
 
@@ -810,7 +810,7 @@ def find_max_ctx_size(model_path: str, n_gpu_layers: int = 99, tensor_split: str
     
     try:
         result = subprocess.run(
-            ["ssh", LXC_HOST, f"test -x {fit_binary}"],
+            ["test", "-x", fit_binary],
             capture_output=True, timeout=5
         )
         if result.returncode != 0:
@@ -825,7 +825,7 @@ def find_max_ctx_size(model_path: str, n_gpu_layers: int = 99, tensor_split: str
     for ctx_size in ctx_sizes:
         try:
             result = subprocess.run(
-                ["ssh", LXC_HOST, fit_binary, "-m", model_path, "--ctx-size", str(ctx_size), 
+                [fit_binary, "-m", model_path, "--ctx-size", str(ctx_size), 
                  "--n-gpu-layers", str(n_gpu_layers), "--tensor-split", tensor_split],
                 capture_output=True, text=True, timeout=60
             )
@@ -846,13 +846,11 @@ def find_max_ctx_size(model_path: str, n_gpu_layers: int = 99, tensor_split: str
 def _detect_tensor_split(repo_id: str, preset_name: str) -> str:
     """Detect tensor-split from existing presets for model family."""
     try:
-        result = subprocess.run(
-            ["ssh", LXC_HOST, "cat", "/root/presets.ini"],
-            capture_output=True, text=True, timeout=10
-        )
-        if result.returncode == 0:
+        if os.path.exists(PRESETS_FILE):
+            with open(PRESETS_FILE, "r") as f:
+                content = f.read()
             preset_name_lower = preset_name.lower()
-            for line in result.stdout.split('\n'):
+            for line in content.split('\n'):
                 if 'tensor-split' in line.lower() and '=' in line:
                     parts = line.split('=')
                     if len(parts) == 2:
@@ -894,15 +892,13 @@ def _extract_param_count(preset_name: str) -> float:
 def write_preset_organized(preset_name: str, params: dict) -> None:
     """Insert preset into presets.ini in the correct position."""
     try:
-        result = subprocess.run(
-            ["ssh", LXC_HOST, "cat", PRESETS_FILE],
-            capture_output=True, text=True, timeout=10
-        )
-        if result.returncode != 0:
+        if not os.path.exists(PRESETS_FILE):
             write_preset_simple(preset_name, params)
             return
         
-        existing_content = result.stdout
+        with open(PRESETS_FILE, "r") as f:
+            existing_content = f.read()
+        
         family = _detect_family(preset_name)
         preset_params = _extract_param_count(preset_name)
         
@@ -976,12 +972,8 @@ def write_preset_organized(preset_name: str, params: dict) -> None:
         
         new_content = '\n'.join(new_lines)
         
-        subprocess.run(
-            ["ssh", LXC_HOST, f"cat > {PRESETS_FILE}"],
-            input=new_content,
-            text=True,
-            timeout=10
-        )
+        with open(PRESETS_FILE, "w") as f:
+            f.write(new_content)
         
         print_success(f"Preset [{preset_name}] written to {PRESETS_FILE}")
         logging.info(f"Auto-generated preset [{preset_name}]")
@@ -999,12 +991,8 @@ def write_preset_simple(preset_name: str, params: dict) -> None:
     block = "\n".join(lines) + "\n"
     
     try:
-        subprocess.run(
-            ["ssh", LXC_HOST, f"cat >> {PRESETS_FILE}"],
-            input=block,
-            text=True,
-            timeout=10
-        )
+        with open(PRESETS_FILE, "a") as f:
+            f.write(block)
         print_success(f"Preset [{preset_name}] written to {PRESETS_FILE}")
     except Exception as e:
         print_error(f"Failed to write preset: {e}")
@@ -1070,7 +1058,7 @@ def get_llamacpp_version() -> Optional[str]:
     """Get installed llama.cpp version."""
     try:
         result = subprocess.run(
-            ["ssh", LXC_HOST, "llama-server", "--version"],
+            ["llama-server", "--version"],
             capture_output=True, text=True, timeout=10
         )
         if result.returncode == 0:
@@ -1106,7 +1094,7 @@ def get_whisper_version() -> Optional[str]:
     """Get installed whisper.cpp version."""
     try:
         result = subprocess.run(
-            ["ssh", LXC_HOST, "whisper-server", "--version"],
+            ["whisper-server", "--version"],
             capture_output=True, text=True, timeout=10
         )
         if result.returncode == 0:
@@ -1184,7 +1172,7 @@ def run_update_script(script_name: str):
     try:
         console.print(f"[{Colors.PRIMARY}]Running update...[/]")
         process = subprocess.Popen(
-            ["ssh", LXC_HOST, f"bash /root/{script_name}"],
+            ["bash", f"/root/{script_name}"],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -1286,22 +1274,16 @@ def _preset_name_from_repo(repo_id: str) -> str:
 
 def offer_preset_generation(repo_id: str, selected_files: List[str]) -> None:
     """After a successful download, offer to write a preset entry to presets.ini."""
-    result = subprocess.run(
-        ["ssh", LXC_HOST, "test", "-f", PRESETS_FILE],
-        capture_output=True
-    )
-    if result.returncode != 0:
+    if not os.path.exists(PRESETS_FILE):
         print_warning(f"presets.ini not found at {PRESETS_FILE} — skipping preset generation")
         return
 
     preset_name = _preset_name_from_repo(repo_id)
 
     try:
-        result = subprocess.run(
-            ["ssh", LXC_HOST, "grep", f"[{preset_name}]", PRESETS_FILE],
-            capture_output=True, text=True, timeout=10
-        )
-        if result.returncode == 0:
+        with open(PRESETS_FILE, "r") as f:
+            content = f.read()
+        if f"[{preset_name}]" in content:
             print_info(f"Preset [{preset_name}] already exists in presets.ini — skipping")
             return
     except Exception:
@@ -1336,7 +1318,7 @@ def offer_preset_generation(repo_id: str, selected_files: List[str]) -> None:
 def download_model(repo_id: str, selected_files: List[str],
                    is_update: bool = False, force: bool = False) -> bool:
     """Download selected GGUF files for a model with progress display."""
-    subprocess.run(["ssh", LXC_HOST, "mkdir", "-p", f"/root/models/{repo_id}"], check=True)
+    subprocess.run(["mkdir", "-p", f"/root/models/{repo_id}"], check=True)
     local_dir = f"/root/models/{repo_id}"
 
     total_size = 0
@@ -1363,7 +1345,7 @@ def download_model(repo_id: str, selected_files: List[str],
         print_info(f"Force redownload: removing {len(selected_files)} file(s)...")
         for f in selected_files:
             subprocess.run(
-                ["ssh", LXC_HOST, "rm", "-f", f"{local_dir}/{f}"],
+                ["rm", "-f", f"{local_dir}/{f}"],
                 capture_output=True
             )
 
@@ -1706,7 +1688,7 @@ def list_downloaded_models() -> None:
 
     try:
         result = subprocess.run(
-            ["ssh", LXC_HOST, "ls", "-la", "/root/models/"],
+            ["ls", "-la", "/root/models/"],
             capture_output=True, text=True, timeout=10
         )
         if result.returncode != 0:
@@ -1721,7 +1703,7 @@ def list_downloaded_models() -> None:
 
     try:
         result = subprocess.run(
-            ["ssh", LXC_HOST, "ls", "/root/models/"],
+            ["ls", "/root/models/"],
             capture_output=True, text=True, timeout=10
         )
         authors = result.stdout.strip().split('\n') if result.returncode == 0 else []
@@ -1731,7 +1713,7 @@ def list_downloaded_models() -> None:
                 continue
             
             result = subprocess.run(
-                ["ssh", LXC_HOST, "ls", f"/root/models/{author}/"],
+                ["ls", f"/root/models/{author}/"],
                 capture_output=True, text=True, timeout=10
             )
             if result.returncode != 0:
@@ -1746,7 +1728,7 @@ def list_downloaded_models() -> None:
                 repo_id = f"{author}/{model}"
                 
                 result = subprocess.run(
-                    ["ssh", LXC_HOST, "ls", model_path],
+                    ["ls", model_path],
                     capture_output=True, text=True, timeout=10
                 )
                 if result.returncode != 0:
@@ -1759,7 +1741,7 @@ def list_downloaded_models() -> None:
                 model_size = 0
                 for f in local_ggufs:
                     result = subprocess.run(
-                        ["ssh", LXC_HOST, "stat", "-c", "%s", f"{model_path}/{f}"],
+                        ["stat", "-c", "%s", f"{model_path}/{f}"],
                         capture_output=True, text=True, timeout=5
                     )
                     if result.returncode == 0:
@@ -1843,7 +1825,7 @@ def list_downloaded_models() -> None:
                 if confirm and confirm.lower() == 'y':
                     try:
                         subprocess.run(
-                            ["ssh", LXC_HOST, "rm", "-rf", model_path],
+                            ["rm", "-rf", model_path],
                             capture_output=True, timeout=30
                         )
                         print_success(f"Deleted {repo_id}")

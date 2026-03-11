@@ -1063,7 +1063,7 @@ def get_llamacpp_version() -> Optional[str]:
         )
         if result.returncode == 0:
             output = result.stdout + result.stderr
-            match = re.search(r'build:\s*(\d+)', output)
+            match = re.search(r'(?:build|version):\s*(\d+)', output)
             if match:
                 return match.group(1)
     except Exception:
@@ -1091,20 +1091,19 @@ def get_llamacpp_latest() -> Optional[str]:
 
 
 def get_whisper_version() -> Optional[str]:
-    """Get installed whisper.cpp version."""
+    """Get installed whisper.cpp version via git tag (whisper-server has no --version flag)."""
     try:
         result = subprocess.run(
-            ["whisper-server", "--version"],
+            ["git", "-C", "/root/whisper.cpp", "describe", "--tags", "--abbrev=0"],
             capture_output=True, text=True, timeout=10
         )
         if result.returncode == 0:
-            output = result.stdout + result.stderr
-            match = re.search(r'v?(\d+\.\d+\.\d+)', output)
-            if match:
-                return match.group(1)
+            tag = result.stdout.strip()
+            if tag:
+                return tag
     except Exception:
         pass
-    return "unknown"
+    return None
 
 
 def get_whisper_latest() -> Optional[str]:
